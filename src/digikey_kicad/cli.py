@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -246,13 +247,15 @@ def bom_order_list(
         if rows and not any(r.get("digikey_pn") or r.get("Digikey_PN") for r in rows):
             console.print("[yellow]No DigiKey PNs found — enriching via API first…[/yellow]", file=sys.stderr)
             rows = enrich_bom(rows, s)
-        order = build_order_list(rows, qty_field=qty_field)
+        order, skipped = build_order_list(rows, qty_field=qty_field)
         if not order:
             emit({"error": "No rows with DigiKey part numbers; enrich the BOM first.", "provenance": provenance}, True)
             raise typer.Exit(1)
         write_csv(order, out)
-        emit({"provenance": provenance, "lines": len(order), "out": str(out), "order": order}, json_out,
-             lambda d: console.print(f"[green]{d['lines']} order lines → {d['out']}[/green]\nUpload at digikey.com → MyLists → Upload BOM."))
+        emit({"provenance": provenance, "lines": len(order), "out": str(out),
+              "skipped_needs_pick": skipped, "order": order}, json_out,
+             lambda d: console.print(f"[green]{d['lines']} order lines → {d['out']}[/green]\nUpload at digikey.com → MyLists → Upload BOM." +
+                                     (f"\n[yellow]Skipped (need picks): {', '.join(d['skipped_needs_pick'])}[/yellow]" if d["skipped_needs_pick"] else "")))
     except typer.Exit:
         raise
     except Exception as e:
@@ -267,7 +270,7 @@ def bom_write_back(
     dry_run: bool = typer.Option(False, "--dry-run", help="Report matches without modifying files"),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """Write Digikey_PN + Datasheet fields back into the .kicad_sch symbols.
+    """Write Digikey_PN + Datasheet + Digikey_URL fields back into the .kicad_sch symbols.
 
     Matches enriched rows to schematic symbols by Reference. Originals are
     backed up as *.kicad_sch.dkbak before modification.
@@ -280,8 +283,9 @@ def bom_write_back(
         for ref, r in expand_references(rows).items():
             dkpn = (r.get("digikey_pn") or r.get("Digikey_PN") or "").strip()
             ds = (r.get("dk_datasheet") or r.get("Datasheet") or r.get("datasheet") or "").strip()
-            if dkpn or ds:
-                ref_map[ref] = {"digikey_pn": dkpn, "datasheet": ds}
+            url = (r.get("dk_product_url") or r.get("Product URL") or r.get("Digikey_URL") or "").strip()
+            if dkpn or ds or url:
+                ref_map[ref] = {"digikey_pn": dkpn, "datasheet": ds, "url": url}
         if not ref_map:
             emit({"error": "Enriched BOM has no digikey_pn/datasheet values; run `dk bom enrich` first."}, True)
             raise typer.Exit(1)
@@ -290,6 +294,122 @@ def bom_write_back(
              lambda d: console.print(
                  f"[green]{d['symbols_updated']} symbols[/green] in {len(d['files_modified'])} files"
                  f"{' (dry run)' if d['dry_run'] else ''}"))
+    except typer.Exit:
+        raise
+    except Exception as e:
+        emit({"error": str(e)}, True)
+        raise typer.Exit(1)
+
+
+@bom_app.command("review")
+def bom_review(
+    enriched: Path = typer.Argument(..., help="Enriched BOM CSV (from `dk bom enrich`)"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """List rows needing an engineering decision (not_found / needs_review / error).
+
+    For each row shows the query tried, best match, stock, and substitute
+    candidates. Confirm a choice with `dk bom pick --ref <REF> --dkpn <PN>`.
+    """
+    try:
+        rows, _prov = load_bom(enriched)
+        flagged = [r for r in rows if (r.get("dk_status") or "") != "found"]
+        out = [
+            {
+                "reference": r.get("Reference") or r.get("Refs"),
+                "value": r.get("Value"),
+                "footprint": r.get("Footprint"),
+                "status": r.get("dk_status"),
+                "reason": r.get("dk_review_reason") or r.get("dk_error") or "",
+                "query": r.get("dk_query") or r.get("dk_tried"),
+                "best": {
+                    "digikey_pn": r.get("digikey_pn"),
+                    "mpn": r.get("dk_mpn"),
+                    "description": r.get("dk_description"),
+                    "stock": r.get("dk_stock"),
+                    "price": r.get("dk_unit_price"),
+                },
+                "alternatives": r.get("dk_alternatives", ""),
+            }
+            for r in flagged
+        ]
+
+        def table(d):
+            t = Table(title=f"{len(out)} rows need review")
+            for c in ("reference", "value", "status", "reason", "best"):
+                t.add_column(c)
+            for e in out:
+                t.add_row(str(e["reference"]), str(e["value"]), str(e["status"]),
+                          str(e["reason"])[:50], str(e["best"]["digikey_pn"]))
+            console.print(t)
+
+        emit({"total": len(rows), "need_review": len(out), "rows": out}, json_out, table)
+    except Exception as e:
+        emit({"error": str(e)}, True)
+        raise typer.Exit(1)
+
+
+@bom_app.command("pick")
+def bom_pick(
+    enriched: Path = typer.Argument(..., help="Enriched BOM CSV to update in place"),
+    ref: str = typer.Option(..., "--ref", help="Reference (e.g. C19) or grouped refs (C19,C29)"),
+    dkpn: str = typer.Option(..., "--dkpn", help="DigiKey part number to assign"),
+    json_out: bool = typer.Option(False, "--json"),
+    client_id: Optional[str] = typer.Option(None, "--client-id"),
+    client_secret: Optional[str] = typer.Option(None, "--client-secret"),
+    env: Optional[str] = typer.Option(None, "--env"),
+):
+    """Confirm an engineering pick: assign a DigiKey PN to BOM row(s) by reference.
+
+    Fetches live details for the part, updates the row's dk_* fields and marks
+    it found (if any packaging has stock) or needs_review (if fully OOS).
+    The CSV is updated in place (backup saved as <file>.bak).
+    """
+    from .bom_ops import _row_qty, choose_variant
+
+    s = _settings(client_id, client_secret, env, None, None, None)
+    try:
+        rows, _prov = load_bom(enriched)
+        if enriched.suffix.lower() != ".csv":
+            emit({"error": "pick only supports CSV BOMs (the enriched output)"}, True)
+            raise typer.Exit(1)
+        wanted = {r.strip().upper() for r in ref.split(",") if r.strip()}
+        details = dk.product_details(s, dkpn)
+        prod = details.get("Product", details)
+        sp = dk.simplify_product(prod)
+        touched: list[str] = []
+        for r in rows:
+            refs = {x.strip().upper() for x in re.split(r"[,\s]+", (r.get("Reference") or r.get("Refs") or "")) if x.strip()}
+            if wanted & refs:
+                chosen = choose_variant(sp.get("variations") or [], _row_qty(r))
+                stock = (chosen.get("stock") if chosen else sp["quantity_available"]) or 0
+                r.update(
+                    {
+                        "digikey_pn": (chosen.get("digikey_pn") if chosen else sp["digikey_pn"]) or dkpn,
+                        "dk_pkg": (chosen.get("packaging") if chosen else ""),
+                        "dk_moq": (chosen.get("moq") if chosen else ""),
+                        "dk_mpn": sp["mpn"],
+                        "dk_manufacturer": sp["manufacturer"],
+                        "dk_description": sp["description"],
+                        "dk_datasheet": sp["datasheet_url"],
+                        "dk_product_url": sp["product_url"],
+                        "dk_unit_price": str(sp["unit_price"] or ""),
+                        "dk_stock": stock,
+                        "dk_status": "found" if stock > 0 else "needs_review",
+                        "dk_review_reason": "" if stock > 0 else "picked part out_of_stock_everywhere",
+                        "dk_query": f"manual-pick:{dkpn}",
+                    }
+                )
+                touched.append(r.get("Reference", ""))
+        if not touched:
+            emit({"error": f"No BOM rows match ref(s): {ref}"}, True)
+            raise typer.Exit(1)
+        backup = enriched.with_suffix(enriched.suffix + ".bak")
+        backup.write_bytes(enriched.read_bytes())
+        write_csv(rows, enriched)
+        emit({"updated_rows": touched, "digikey_pn": dkpn, "stock": stock,
+              "out": str(enriched), "backup": str(backup)}, json_out,
+             lambda d: console.print(f"[green]Updated {d['updated_rows']}[/green] → {dkpn} (stock {stock})"))
     except typer.Exit:
         raise
     except Exception as e:

@@ -169,6 +169,7 @@ def parse_sch_entries(sch: Path) -> list[dict]:
                 "Manufacturer": mfg,
                 "LCSC": props.get("LCSC", ""),
                 "Digikey_PN": props.get("Digikey_PN", props.get("DK_PN", props.get("DigiKey_PN", ""))),
+                "Digikey_URL": props.get("Digikey_URL", props.get("Product_URL", props.get("DK_URL", ""))),
                 "Datasheet": props.get("Datasheet", ""),
                 "Description": props.get("Description", ""),
                 "DNP": "yes" if dnp else "",
@@ -301,6 +302,95 @@ def _kind_hint(reference: str, value: str) -> str:
     return ""
 
 
+def _strip_pkg_suffix(value: str) -> str:
+    """SM712_SOT23 -> SM712 (drop trailing package-like _TOKEN)."""
+    toks = value.split("_")
+    while len(toks) > 1 and (
+        SIZE_RE.fullmatch(toks[-1].upper().replace("-", "")) or SIZE_RE.search(toks[-1].upper())
+    ):
+        toks.pop()
+    out = "_".join(toks)
+    return out if out else value
+
+
+def _normalize_value(value: str) -> str:
+    """30 mR -> R030 (DigiKey R-notation for milliohm resistors)."""
+    m = re.fullmatch(r"\s*(\d+)\s*mR\s*", value, re.IGNORECASE)
+    if m:
+        return f"R{m.group(1).zfill(3)}"
+    return value.strip()
+
+
+DROP_TOKENS_RE = re.compile(r"(?i)^(p\d[\d.]*mm|\d+\.\d+mm|vertical|horizontal|straight|right-angle|smd|tht|smt|male|female)$")
+
+
+def _humanize(text: str) -> str:
+    """PinHeader_1x07_P2.54mm_Vertical -> 'pin header 1x07'."""
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text.replace("_", " "))
+    toks = [t for t in spaced.split() if not DROP_TOKENS_RE.match(t)]
+    return " ".join(toks).lower().strip()
+
+
+def _footprint_queries(footprint: str) -> list[str]:
+    """Derive keyword queries from a KiCad footprint, e.g.
+    'Connector_PinHeader_2.54mm:PinHeader_1x07_P2.54mm_Vertical'
+    -> ['pin header 1x07', 'RS282G05A3', 'XT60 connector']."""
+    fp = (footprint or "").strip()
+    if not fp:
+        return []
+    tail = fp.split(":")[-1]
+    out: list[str] = []
+    human = _humanize(tail)
+    if human:
+        out.append(human)
+    toks = re.findall(r"[A-Za-z0-9]+(?:[-][A-Za-z0-9]+)*", fp)
+    # MPN-like token: longest alnum token containing a digit (skip dimensions)
+    cands = [t for t in toks if any(c.isdigit() for c in t)]
+    cands = [t for t in cands if not re.fullmatch(r"(?i)(\d+x\d+|p\d[\d.]*mm|\d+(?:\.\d+)?mm|\d+metric)", t)]
+    long_cands = [t for t in cands if len(t.replace("-", "")) >= 6]
+    if long_cands:
+        out.append(max(long_cands, key=len))
+    # Connector family fallback: leading letters+digits of a token (XT60PW-M -> XT60)
+    for t in toks:
+        m = re.match(r"[A-Za-z]+\d+", t)
+        if m and len(m.group(0)) >= 4:
+            out.append(f"{m.group(0)} connector")
+            break
+    # dedupe, preserve order
+    seen: list[str] = []
+    for q in out:
+        if q and q not in seen:
+            seen.append(q)
+    return seen
+
+
+def candidate_queries(row: dict) -> list[str]:
+    """Ordered DigiKey keyword queries for a BOM row, best first."""
+    val = (row.get("Value") or "").strip()
+    # Exact identifiers always first
+    for key in ("Digikey_PN", "DK_PN", "MPN", "mpn"):
+        v = (row.get(key) or "").strip()
+        if v:
+            return [v]
+    if not val:
+        desc = (row.get("Description") or "").strip()
+        return [desc] if desc else []
+    queries: list[str] = []
+    # Generic KiCad placeholder values (Conn_01x02) carry no info -> footprint first
+    if re.match(r"(?i)^conn", val):
+        queries.extend(_footprint_queries(row.get("Footprint") or ""))
+        queries.append(val)
+    else:
+        queries.append(build_search_query(row))
+        bare = _normalize_value(_strip_pkg_suffix(val))
+        if bare and bare != queries[0]:
+            queries.append(bare)
+        for fq in _footprint_queries(row.get("Footprint") or ""):
+            if fq not in queries:
+                queries.append(fq)
+    return [q for q in queries if q]
+
+
 def build_search_query(row: dict) -> str:
     """Build the best DigiKey keyword query for a BOM row.
 
@@ -376,9 +466,9 @@ def write_back_to_schematic(
     ref_map: dict[str, dict],
     dry_run: bool = False,
 ) -> dict:
-    """Write Digikey_PN + Datasheet fields into .kicad_sch symbols.
+    """Write Digikey_PN + Datasheet + Digikey_URL fields into .kicad_sch symbols.
 
-    ref_map: Reference -> {"digikey_pn": ..., "datasheet": ...}.
+    ref_map: Reference -> {"digikey_pn": ..., "datasheet": ..., "url": ...}.
     Returns summary dict {files_modified, symbols_updated, details}.
     """
     schs = find_schematics(project_dir)
@@ -416,7 +506,8 @@ def write_back_to_schematic(
                 continue
             dkpn = str(info.get("digikey_pn") or "").strip()
             ds = str(info.get("datasheet") or info.get("dk_datasheet") or "").strip()
-            if not dkpn and not ds:
+            url = str(info.get("url") or info.get("dk_product_url") or "").strip()
+            if not dkpn and not ds and not url:
                 continue
             s, e = start + offset, end + offset
             cur = new_text[s:e]
@@ -426,6 +517,9 @@ def write_back_to_schematic(
                 changed_any = changed_any or ch
             if ds:
                 cur, ch = _set_property_in_symbol(cur, "Datasheet", ds)
+                changed_any = changed_any or ch
+            if url:
+                cur, ch = _set_property_in_symbol(cur, "Digikey_URL", url)
                 changed_any = changed_any or ch
             if changed_any:
                 new_text = new_text[:s] + cur + new_text[e:]

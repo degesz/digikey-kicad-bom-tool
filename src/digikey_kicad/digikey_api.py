@@ -131,6 +131,10 @@ def simplify_product(p: dict) -> dict:
     )
     status = p.get("ProductStatus")
     stock_status = p.get("StockStatus") or (status.get("Status") if isinstance(status, dict) else status)
+    qty = p.get("QuantityAvailable")
+    if qty is None and variations:
+        # ProductDetails responses carry stock per packaging variation only
+        qty = sum((v.get("QuantityAvailableforPackageType") or 0) for v in variations)
     flat_params = []
     for x in params:
         if not isinstance(x, dict):
@@ -149,7 +153,7 @@ def simplify_product(p: dict) -> dict:
         "product_url": p.get("ProductUrl"),
         "photo_url": p.get("PhotoUrl"),
         "category": cat.get("Name") if isinstance(cat, dict) else cat,
-        "quantity_available": p.get("QuantityAvailable"),
+        "quantity_available": qty,
         "stock_status": stock_status,
         "unit_price": (p.get("UnitPrice") or None),
         "price_breaks": price_breaks,
