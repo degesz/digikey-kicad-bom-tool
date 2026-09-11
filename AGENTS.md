@@ -17,6 +17,7 @@ dk bom order-list <enriched.csv|project-dir> --out order_list.csv --json
 dk bom push-list <enriched.csv|order.csv|project-dir> --list-name NAME [--tags T] [--multiply N] [--open] --json
 dk bom review <enriched.csv> --json
 dk bom pick <enriched.csv> --ref <REF> --dkpn <DKPN> --json
+dk bom exclude <enriched.csv> --ref <REF...> [--reason R] [--clear] --json
 dk bom write-back <enriched.csv> <project-dir> [--dry-run] --json
 ```
 
@@ -44,6 +45,9 @@ dk bom write-back <enriched.csv> <project-dir> [--dry-run] --json
   dk_status (found|needs_review|not_found|error), dk_review_reason, dk_alternatives`.
 - Enrich policy: exact MPN wins; generic passives ranked by stock then price;
   chosen variant prefers in-stock cut tape / Digi-Reel (lowest MOQ covering Qty).
+  Marketplace variations are never chosen (flagged `marketplace_only`).
   `needs_review` rows need a human/agent pick via `dk bom pick`.
+- Generic hardware (cables, pin headers) can be dropped from ordering with
+  `dk bom exclude` (status `ignored`, kept across re-enrichment).
 - Credentials: flags `--client-id/--client-secret/--env` override env `DIGIKEY_CLIENT_ID/...`; do not print secrets.
 - Never commit `.env` or token cache (`~/.cache/digikey-kicad/`).
