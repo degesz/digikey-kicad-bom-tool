@@ -334,9 +334,11 @@ def bom_review(
                 "footprint": r.get("Footprint"),
                 "status": r.get("dk_status"),
                 "reason": r.get("dk_review_reason") or r.get("dk_error") or "",
+                "warning": r.get("dk_verify_warning") or "",
                 "query": r.get("dk_query") or r.get("dk_tried"),
                 "best": {
-                    "digikey_pn": r.get("digikey_pn"),
+                    "digikey_pn": r.get("digikey_pn") or r.get("dk_suggested_pn"),
+                    "suggested": bool(not (r.get("digikey_pn") or "").strip() and (r.get("dk_suggested_pn") or "").strip()),
                     "mpn": r.get("dk_mpn"),
                     "description": r.get("dk_description"),
                     "stock": r.get("dk_stock"),
@@ -376,8 +378,13 @@ def bom_pick(
 
     Fetches live details for the part, updates the row's dk_* fields and marks
     it found (if any packaging has stock) or needs_review (if fully OOS).
+    The pick is always applied (explicit human decision), but when the part
+    does not verify against the row's Value/Footprint/MPN a `warning` is
+    returned and stored as `dk_verify_warning` — double-check before ordering.
     The CSV is updated in place (backup saved as <file>.bak).
     """
+    from .bom_ops import _row_qty, choose_variant
+    from .verify import verify_match
     from .bom_ops import _row_qty, choose_variant
 
     s = _settings(client_id, client_secret, env, None, None, None)
@@ -391,11 +398,19 @@ def bom_pick(
         prod = details.get("Product", details)
         sp = dk.simplify_product(prod)
         touched: list[str] = []
+        warnings: list[str] = []
         for r in rows:
             refs = {x.strip().upper() for x in re.split(r"[,\s]+", (r.get("Reference") or r.get("Refs") or "")) if x.strip()}
             if wanted & refs:
+                # Verify against Value/Footprint/MPN (ignoring any stale DKPN
+                # columns: this explicit pick overrides them).
+                check_row = {**r, "Digikey_PN": "", "DK_PN": "", "digikey_pn": ""}
+                ok_v, why_v = verify_match(check_row, sp)
                 chosen = choose_variant(sp.get("variations") or [], _row_qty(r))
                 stock = (chosen.get("stock") if chosen else sp["quantity_available"]) or 0
+                warn = "" if ok_v else f"manual pick does not verify ({why_v})"
+                if warn:
+                    warnings.append(f"{r.get('Reference', '')}: {warn}")
                 r.update(
                     {
                         "digikey_pn": (chosen.get("digikey_pn") if chosen else sp["digikey_pn"]) or dkpn,
@@ -410,6 +425,7 @@ def bom_pick(
                         "dk_stock": stock,
                         "dk_status": "found" if stock > 0 else "needs_review",
                         "dk_review_reason": "" if stock > 0 else "picked part out_of_stock_everywhere",
+                        "dk_verify_warning": warn,
                         "dk_query": f"manual-pick:{dkpn}",
                     }
                 )
@@ -421,8 +437,10 @@ def bom_pick(
         backup.write_bytes(enriched.read_bytes())
         write_csv(rows, enriched)
         emit({"updated_rows": touched, "digikey_pn": dkpn, "stock": stock,
+              "warning": "; ".join(warnings),
               "out": str(enriched), "backup": str(backup)}, json_out,
-             lambda d: console.print(f"[green]Updated {d['updated_rows']}[/green] → {dkpn} (stock {stock})"))
+              lambda d: console.print(f"[green]Updated {d['updated_rows']}[/green] → {dkpn} (stock {stock})" +
+                                      (f"\n[yellow]WARNING: {d['warning']}[/yellow]" if d["warning"] else "")))
     except typer.Exit:
         raise
     except Exception as e:

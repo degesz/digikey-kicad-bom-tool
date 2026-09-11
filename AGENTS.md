@@ -42,11 +42,25 @@ dk bom write-back <enriched.csv> <project-dir> [--dry-run] --json
 - Errors: exit ≠ 0, stdout is `{"error": "..."}` — surface the message.
 - Enriched rows carry: `digikey_pn, dk_pkg, dk_moq, dk_mpn, dk_manufacturer,
   dk_description, dk_datasheet, dk_product_url, dk_stock, dk_unit_price,
-  dk_status (found|needs_review|not_found|error), dk_review_reason, dk_alternatives`.
-- Enrich policy: exact MPN wins; generic passives ranked by stock then price;
-  chosen variant prefers in-stock cut tape / Digi-Reel (lowest MOQ covering Qty).
+  dk_status (found|needs_review|not_found|error), dk_review_reason, dk_alternatives`,
+  plus `dk_suggested_pn` (unverified candidate, never ordered) and
+  `dk_verify_warning` (set by `pick` when the chosen part fails verification).
+- Enrich policy (fail-closed): a candidate is auto-selected (`found`) ONLY if it
+  verifies — exact MPN/DKPN match, or passive value + package both confirmed
+  (unit traps `30 mR`/`R030`, metric/imperial aliases, `SOT-23` vs `SOT-223`,
+  voltage rating, manufacturer sanity). Anything else becomes `needs_review`
+  with `digikey_pn` left EMPTY and the candidate kept in `dk_suggested_pn` /
+  `dk_alternatives` — never ordered, never written back. Connectors/switches/
+  fuses and ICs without an exact MPN always need a human/agent pick via
+  `dk bom pick` (which applies the pick but reports a `warning` when it does
+  not verify — double-check before ordering).
+  Chosen variant prefers in-stock cut tape / Digi-Reel (lowest MOQ covering Qty).
   Marketplace variations are never chosen (flagged `marketplace_only`).
   `needs_review` rows need a human/agent pick via `dk bom pick`.
+- DNP rows and generic pin headers (`Conn_*` on a `PinHeader` footprint) are
+  auto-ignored at enrich time (`ignored`) — never looked up, never ordered.
+  `dk bom check-stock` reports rows without a DKPN as `needs_pick` (no stock
+  is ever attributed from an unverified keyword hit).
 - Generic hardware (cables, pin headers) can be dropped from ordering with
   `dk bom exclude` (status `ignored`, kept across re-enrichment).
   Generic pin headers (`Conn_*` on a `PinHeader` footprint) are auto-ignored

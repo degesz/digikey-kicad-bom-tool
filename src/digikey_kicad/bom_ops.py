@@ -7,6 +7,7 @@ from pathlib import Path
 from . import digikey_api as dk
 from .config import Settings
 from .kicad_bom import candidate_queries, generic_hardware_reason
+from .verify import manufacturers_match, verify_match
 
 
 def _row_qty(row: dict) -> int:
@@ -30,10 +31,11 @@ def _all_marketplace(product: dict) -> bool:
     return bool(varss) and all(v.get("MarketPlace", False) for v in varss)
 
 
-def rank_products(products: list[dict], row_mpn: str = "") -> list[dict]:
+def rank_products(products: list[dict], row_mpn: str = "", row_mfg: str = "") -> list[dict]:
     """Best candidate first.
 
     - Exact MPN match always wins (row carries a real manufacturer part number).
+    - A matching manufacturer breaks ties between identical MPNs.
     - Otherwise prefer large stock + low single-unit price (generic passives).
     - Marketplace-only products sort last (never preferred when a
       DigiKey-stocked alternative exists).
@@ -46,8 +48,10 @@ def rank_products(products: list[dict], row_mpn: str = "") -> list[dict]:
             exact = 0
         else:
             exact = 1 if mpn else 0  # no MPN -> all generic, rank by availability
+        mfg = (p.get("Manufacturer", {}) or {}).get("Name", "")
+        mfg_bad = 1 if (row_mfg and mfg and not manufacturers_match(row_mfg, mfg)) else 0
         stock = p.get("QuantityAvailable") or 0
-        return (exact, 1 if _all_marketplace(p) else 0, 0 if stock > 0 else 1, _price_of(p), -stock)
+        return (exact, mfg_bad, 1 if _all_marketplace(p) else 0, 0 if stock > 0 else 1, _price_of(p), -stock)
 
     return sorted(products, key=key)
 
@@ -131,8 +135,37 @@ def enrich_bom(
                 out.update({"dk_status": "not_found", "dk_query": ""})
             else:
                 row_mpn = (row.get("MPN") or row.get("mpn") or "").strip()
-                ranked = rank_products(products, row_mpn)
+                row_mfg = (row.get("Manufacturer") or row.get("manufacturer") or "").strip()
+                ranked = rank_products(products, row_mpn, row_mfg)
                 best = dk.simplify_product(ranked[0])
+                # Safety gate: never auto-select a part we cannot defend.
+                # If verification fails the row goes to needs_review with NO
+                # digikey_pn — the candidate is kept only as a suggestion.
+                ok, why = verify_match(row, best)
+                if not ok:
+                    out.update(
+                        {
+                            "digikey_pn": "",
+                            "dk_pkg": "",
+                            "dk_moq": "",
+                            "dk_stock": "",
+                            "dk_mpn": best["mpn"],
+                            "dk_manufacturer": best["manufacturer"],
+                            "dk_description": best["description"],
+                            "dk_datasheet": "",
+                            "dk_product_url": "",
+                            "dk_unit_price": str(best["unit_price"] or ""),
+                            "dk_candidates": len(products),
+                            "dk_query": used,
+                            "dk_suggested_pn": best["digikey_pn"],
+                            "dk_status": "needs_review",
+                            "dk_review_reason": why,
+                            "dk_alternatives": alternates_text(ranked[:3]),
+                        }
+                    )
+                    time.sleep(delay_s)
+                    enriched.append(out)
+                    continue
                 needed = _row_qty(row)
                 chosen = choose_variant(best.get("variations") or [], needed)
                 base = {
@@ -194,75 +227,54 @@ def enrich_bom(
 def check_stock(rows: list[dict], settings: Settings) -> list[dict]:
     """Live stock per row. Packaging doesn't matter (cut tape accepted):
     `ok` is true when ANY packaging variant has stock; `best_pkg` names the
-    preferred orderable variant (prototype-friendly CT/Digi-Reel first)."""
+    preferred orderable variant (prototype-friendly CT/Digi-Reel first).
+
+    Rows without an assigned DigiKey PN are reported as `needs_pick` — stock
+    of an unverified keyword hit is never attributed to the row, since that
+    hit may be the wrong part entirely.
+    """
     results: list[dict] = []
     for row in rows:
         if (row.get("dk_status") or "") == "ignored":
             results.append({**row, "stock_status": "ignored", "ok": False})
             continue
         dkpn = (row.get("digikey_pn") or row.get("Digikey_PN") or row.get("DK_PN") or "").strip()
-        queries = candidate_queries(row) if not dkpn else [dkpn]
-        query = queries[0] if queries else ""
-        if not query:
-            results.append({**row, "stock_status": "skipped"})
+        if not dkpn:
+            results.append({**row, "stock_status": "needs_pick (no DigiKey PN assigned)", "ok": False})
             continue
         try:
-            if dkpn:
-                try:
-                    details = dk.product_details(settings, dkpn)
-                    prod = details.get("Product", details)
-                    s = dk.simplify_product(prod)
-                    # Prefer the exact packaging variation's stock when present
-                    stock = s["quantity_available"]
-                    for v in s.get("variations") or []:
-                        if (v.get("digikey_pn") or "").upper() == dkpn.upper():
-                            stock = v.get("stock")
-                            break
-                    needed = _row_qty(row)
-                    best = choose_variant(s.get("variations") or [], needed)
-                    retail = [v for v in (s.get("variations") or []) if not v.get("marketplace")]
-                    any_stock = max([(v.get("stock") or 0) for v in retail] + [0])
-                    mp_stock = marketplace_stock(s.get("variations") or [])
-                    status = s["stock_status"]
-                    if any_stock == 0 and mp_stock > 0:
-                        status = f"{status} (marketplace-only stock excluded)" if status else "marketplace-only stock"
-                    results.append(
-                        {
-                            **row,
-                            "digikey_pn": s["digikey_pn"] or dkpn,
-                            "stock": stock,
-                            "stock_any_pkg": any_stock,
-                            "best_pkg": (best or {}).get("digikey_pn", ""),
-                            "best_pkg_name": (best or {}).get("packaging", ""),
-                            "marketplace_stock": mp_stock,
-                            "stock_status": status,
-                            "unit_price": str(s["unit_price"] or ""),
-                            "datasheet": s["datasheet_url"],
-                            "ok": any_stock > 0,
-                        }
-                    )
-                    continue
-                except Exception:
-                    pass  # fall back to keyword search
-            data = dk.keyword_search(settings, query, limit=1)
-            prods = data.get("Products", []) or []
-            if not prods:
-                results.append({**row, "stock_status": "not_found", "ok": False})
-            else:
-                s = dk.simplify_product(prods[0])
-                any_stock = s["quantity_available"] or 0
-                results.append(
-                    {
-                        **row,
-                        "digikey_pn": s["digikey_pn"],
-                        "stock": any_stock,
-                        "stock_any_pkg": any_stock,
-                        "best_pkg": s["digikey_pn"],
-                        "unit_price": str(s["unit_price"] or ""),
-                        "datasheet": s["datasheet_url"],
-                        "ok": any_stock > 0,
-                    }
-                )
+            details = dk.product_details(settings, dkpn)
+            prod = details.get("Product", details)
+            s = dk.simplify_product(prod)
+            # Prefer the exact packaging variation's stock when present
+            stock = s["quantity_available"]
+            for v in s.get("variations") or []:
+                if (v.get("digikey_pn") or "").upper() == dkpn.upper():
+                    stock = v.get("stock")
+                    break
+            needed = _row_qty(row)
+            best = choose_variant(s.get("variations") or [], needed)
+            retail = [v for v in (s.get("variations") or []) if not v.get("marketplace")]
+            any_stock = max([(v.get("stock") or 0) for v in retail] + [0])
+            mp_stock = marketplace_stock(s.get("variations") or [])
+            status = s["stock_status"]
+            if any_stock == 0 and mp_stock > 0:
+                status = f"{status} (marketplace-only stock excluded)" if status else "marketplace-only stock"
+            results.append(
+                {
+                    **row,
+                    "digikey_pn": s["digikey_pn"] or dkpn,
+                    "stock": stock,
+                    "stock_any_pkg": any_stock,
+                    "best_pkg": (best or {}).get("digikey_pn", ""),
+                    "best_pkg_name": (best or {}).get("packaging", ""),
+                    "marketplace_stock": mp_stock,
+                    "stock_status": status,
+                    "unit_price": str(s["unit_price"] or ""),
+                    "datasheet": s["datasheet_url"],
+                    "ok": any_stock > 0,
+                }
+            )
         except Exception as e:
             results.append({**row, "stock_status": f"error: {e}"[:200], "ok": False})
     return results

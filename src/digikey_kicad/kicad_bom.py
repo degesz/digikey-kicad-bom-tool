@@ -1,12 +1,13 @@
 """KiCad project -> BOM resolution.
 
 Supports pointing at a KiCad 10 project *folder*:
-  1. If <project>/*.csv BOM already exists, use the newest one.
-  2. Else if kicad-cli is installed, run `sch export bom` (CSV) or
+  1. If kicad-cli is installed, run `sch export bom` (CSV) or
      `sch export python-bom` (XML) against the root .kicad_sch.
-  3. Else parse the .kicad_sch S-expression directly (Value/Footprint/MPN fields).
+  2. Else parse the .kicad_sch S-expressions directly (all sheets,
+     grouped by Value+Footprint+MPN; Value/Footprint/MPN fields kept).
 
-Also parses standalone .csv / .xml BOM files.
+Also parses standalone .csv / .xml BOM files (kicad-cli `${QUANTITY}` /
+`${DNP}` headers are normalized to Qty/DNP).
 """
 from __future__ import annotations
 
@@ -59,15 +60,6 @@ def find_root_sch(project_dir: Path, schs: list[Path] | None = None) -> Path | N
     return max(top, key=lambda p: p.stat().st_size if p.exists() else 0)
 
 
-def find_existing_boms(project_dir: Path) -> list[Path]:
-    cands = list(project_dir.glob("*bom*.csv")) + list(project_dir.glob("*bom*.xml"))
-    cands += list(project_dir.glob("*.csv")) + list(project_dir.glob("*.xml"))
-    # newest first
-    cands = [c for c in cands if c.is_file()]
-    cands.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return cands
-
-
 def kicad_cli() -> str | None:
     return shutil.which("kicad-cli")
 
@@ -94,12 +86,52 @@ def export_bom_via_kicad_cli(sch: Path, out: Path) -> Path:
     return out
 
 
+# kicad-cli exports KiCad field variables verbatim as headers
+# (${QUANTITY}, ${DNP}); normalize them to the names the rest of the
+# tool (and agents) expect.
+_HEADER_ALIASES = {
+    "${quantity}": "Qty",
+    "quantity": "Qty",
+    "qty": "Qty",
+    "${dnp}": "DNP",
+    "dnp": "DNP",
+    "donotpopulate": "DNP",
+    "dni": "DNP",
+    "reference": "Reference",
+    "ref": "Reference",
+    "value": "Value",
+    "footprint": "Footprint",
+    "mpn": "MPN",
+    "manufacturer": "Manufacturer",
+    "mfr.": "Manufacturer",
+    "mfg": "Manufacturer",
+    "digikey_pn": "Digikey_PN",
+    "dk_pn": "Digikey_PN",
+    "digikeypn": "Digikey_PN",
+    "description": "Description",
+    "datasheet": "Datasheet",
+}
+
+
+def _normalize_headers(fieldnames: list[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for h in fieldnames or []:
+        key = h.strip().lower()
+        mapping[h] = _HEADER_ALIASES.get(key, h.strip())
+    return mapping
+
+
 def parse_csv_bom(path: Path) -> list[dict]:
     with path.open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
             return []
-        return [{k.strip(): (v or "").strip() for k, v in row.items()} for row in reader]
+        mapping = _normalize_headers(reader.fieldnames)
+        rows = []
+        for row in reader:
+            norm = {(mapping.get(k, k)): ((v or "").strip()) for k, v in row.items() if k}
+            rows.append({k.strip(): v for k, v in norm.items()})
+        return rows
 
 
 def parse_xml_bom(path: Path) -> list[dict]:
@@ -204,10 +236,13 @@ def parse_project_schs(project_dir: Path) -> tuple[list[dict], list[dict]]:
 
 
 def group_entries(entries: list[dict]) -> list[dict]:
-    # Group identical Value+Footprint+MPN into one row with combined refs
+    # Group identical Value+Footprint+MPN+Manufacturer+DNP into one row.
+    # DNP and Manufacturer are part of the key so unpopulated rows are never
+    # merged with populated ones (they must not be ordered).
     grouped: dict[tuple, dict] = {}
     for e in entries:
-        key = (e["Value"], e["Footprint"], e.get("MPN", ""), e.get("Digikey_PN", ""))
+        key = (e["Value"], e["Footprint"], e.get("MPN", ""),
+               e.get("Manufacturer", ""), e.get("DNP", ""), e.get("Digikey_PN", ""))
         g = grouped.setdefault(key, {**e, "Reference": [], "Qty": 0})
         if isinstance(g["Reference"], list):
             g["Reference"].append(e["Reference"])
@@ -257,7 +292,13 @@ def load_bom(source: Path) -> tuple[list[dict], str]:
                 rows, _ = load_bom(got)
                 return rows, f"kicad-cli:{root}->{got}"
             finally:
-                pass
+                # never leak temp exports (csv + possible xml fallback)
+                for tmp in (out, out.with_suffix(".xml")):
+                    try:
+                        if tmp.exists():
+                            tmp.unlink()
+                    except OSError:
+                        pass
         rows, _entries = parse_project_schs(source)
         return rows, f"sch-direct:{root}+{len(schs) - 1} sheets"
     raise FileNotFoundError(f"BOM source not found: {source}")
@@ -364,12 +405,25 @@ def _footprint_queries(footprint: str) -> list[str]:
     return seen
 
 
+def _is_dnp(row: dict) -> bool:
+    """True when any DNP-ish column marks the row do-not-populate."""
+    for k in ("DNP", "dnp", "${DNP}", "DoNotPopulate", "DNI", "NP"):
+        v = str(row.get(k, "") or "").strip().lower()
+        if v and v not in ("0", "no", "false", "n", "empty"):
+            return True
+    return False
+
+
 def generic_hardware_reason(row: dict) -> str:
-    """Detect lab-stock hardware that must never be looked up or ordered.
+    """Detect lab-stock / unpopulated hardware that must never be looked up
+    or ordered.
 
     Generic KiCad pin-header placeholders (Value Conn_* on a PinHeader
-    footprint) are assembly stock, not purchase parts.
+    footprint) are assembly stock, not purchase parts. DNP rows are not
+    fitted to the board at all.
     """
+    if _is_dnp(row):
+        return "DNP (do not populate): never looked up, never ordered"
     val = (row.get("Value") or "").strip()
     fp = (row.get("Footprint") or "").lower()
     if re.match(r"(?i)^conn_", val) and "pinheader" in fp.replace("_", ""):

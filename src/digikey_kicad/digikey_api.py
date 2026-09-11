@@ -13,13 +13,15 @@ from .config import Settings, require_credentials
 TOKEN_CACHE = Path.home() / ".cache" / "digikey-kicad" / "token.json"
 
 
-def _load_cached_token(client_id: str) -> dict | None:
+def _load_cached_token(client_id: str, env: str) -> dict | None:
     try:
         if not TOKEN_CACHE.exists():
             return None
         data = json.loads(TOKEN_CACHE.read_text())
         if data.get("client_id") != client_id:
             return None
+        if data.get("env") != env:
+            return None  # prod/sandbox tokens are not interchangeable
         if data.get("expires_at", 0) < time.time():
             return None
         return data
@@ -27,13 +29,14 @@ def _load_cached_token(client_id: str) -> dict | None:
         return None
 
 
-def _save_token(client_id: str, access_token: str, expires_in: int) -> None:
+def _save_token(client_id: str, env: str, access_token: str, expires_in: int) -> None:
     try:
         TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
         TOKEN_CACHE.write_text(
             json.dumps(
                 {
                     "client_id": client_id,
+                    "env": env,
                     "access_token": access_token,
                     "expires_at": time.time() + int(expires_in) - 60,
                 }
@@ -45,7 +48,7 @@ def _save_token(client_id: str, access_token: str, expires_in: int) -> None:
 
 def get_access_token(settings: Settings) -> str:
     require_credentials(settings)
-    cached = _load_cached_token(settings.client_id)
+    cached = _load_cached_token(settings.client_id, settings.env)
     if cached:
         return cached["access_token"]
     resp = requests.post(
@@ -63,7 +66,7 @@ def get_access_token(settings: Settings) -> str:
     token = data.get("access_token")
     if not token:
         raise RuntimeError(f"Token endpoint returned no access_token: {data}")
-    _save_token(settings.client_id, token, int(data.get("expires_in", 600)))
+    _save_token(settings.client_id, settings.env, token, int(data.get("expires_in", 600)))
     return token
 
 
@@ -133,8 +136,10 @@ def simplify_product(p: dict) -> dict:
     stock_status = p.get("StockStatus") or (status.get("Status") if isinstance(status, dict) else status)
     qty = p.get("QuantityAvailable")
     if qty is None and variations:
-        # ProductDetails responses carry stock per packaging variation only
-        qty = sum((v.get("QuantityAvailableforPackageType") or 0) for v in variations)
+        # ProductDetails responses carry stock per packaging variation only;
+        # marketplace stock is excluded (never orderable through DigiKey).
+        qty = sum((v.get("QuantityAvailableforPackageType") or 0)
+                  for v in variations if not v.get("MarketPlace", False))
     flat_params = []
     for x in params:
         if not isinstance(x, dict):
