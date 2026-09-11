@@ -29,7 +29,8 @@ dk bom write-back <enriched.csv> <project-dir> [--dry-run] --json
    `dk bom pick ./enriched.csv --ref C19 --dkpn <DKPN> --json`, re-run check-stock.
 4. Order list: `dk bom order-list ./enriched.csv --out order.csv --json` then tell the user to upload at digikey.com → MyLists → Upload BOM.
 5. Write back into schematics (`Digikey_PN` + `Datasheet` + `Digikey_URL` per symbol,
-   `*.dkbak` backups): `dk bom write-back ./enriched.csv ./proj --json`
+   backups in `<proj>/.dk-backups/`, loose `*.dkbak` auto-migrated there):
+   `dk bom write-back ./enriched.csv ./proj --json`
 6. Single part: `dk search "STM32G431KBT6" --json` → `dk details <DKPN> --json`.
 
 ## Conventions

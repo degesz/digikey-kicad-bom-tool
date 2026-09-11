@@ -273,7 +273,7 @@ def bom_write_back(
     """Write Digikey_PN + Datasheet + Digikey_URL fields back into the .kicad_sch symbols.
 
     Matches enriched rows to schematic symbols by Reference. Originals are
-    backed up as *.kicad_sch.dkbak before modification.
+    backed up into <project>/.dk-backups/ before modification.
     """
     from .kicad_bom import expand_references, write_back_to_schematic
 

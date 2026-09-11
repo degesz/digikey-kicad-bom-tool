@@ -422,6 +422,28 @@ def row_search_text(row: dict) -> str:
     return build_search_query(row)
 
 
+BACKUP_DIR_NAME = ".dk-backups"
+BACKUP_SUFFIX = ".dkbak"
+
+
+def backup_path_for(sch: Path) -> Path:
+    d = sch.parent / BACKUP_DIR_NAME
+    d.mkdir(exist_ok=True)
+    return d / (sch.name + BACKUP_SUFFIX)
+
+
+def migrate_loose_backups(project_dir: Path) -> list[str]:
+    """Move stray *.dkbak files from the project root into .dk-backups/."""
+    moved: list[str] = []
+    for loose in sorted(project_dir.glob(f"*{BACKUP_SUFFIX}")):
+        if loose.is_file() and loose.parent == project_dir:
+            dest = project_dir / BACKUP_DIR_NAME / loose.name
+            dest.parent.mkdir(exist_ok=True)
+            loose.rename(dest)
+            moved.append(loose.name)
+    return moved
+
+
 PROPERTY_TEMPLATE = (
     '\t\t(property "{name}" "{value}"\n'
     '\t\t\t(at 0 0 0)\n'
@@ -470,7 +492,11 @@ def write_back_to_schematic(
 
     ref_map: Reference -> {"digikey_pn": ..., "datasheet": ..., "url": ...}.
     Returns summary dict {files_modified, symbols_updated, details}.
+    Backups go to <project>/.dk-backups/ (never loose in the project folder);
+    pre-existing loose *.dkbak files are moved there first.
     """
+    schs = find_schematics(project_dir)
+    migrated = migrate_loose_backups(project_dir)
     schs = find_schematics(project_dir)
     files_modified: list[str] = []
     details: list[dict] = []
@@ -530,12 +556,13 @@ def write_back_to_schematic(
         if file_updates:
             files_modified.append(sch.name)
             if not dry_run:
-                backup = sch.with_suffix(sch.suffix + ".dkbak")
-                backup.write_text(text, encoding="utf-8")
+                backup_path_for(sch).write_text(text, encoding="utf-8")
                 sch.write_text(new_text, encoding="utf-8")
     return {
         "files_modified": files_modified,
         "symbols_updated": symbols_updated,
         "details": details,
         "dry_run": dry_run,
+        "backups_migrated": migrated,
+        "backup_dir": BACKUP_DIR_NAME,
     }
