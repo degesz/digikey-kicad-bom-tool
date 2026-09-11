@@ -230,6 +230,57 @@ def check_stock(rows: list[dict], settings: Settings) -> list[dict]:
     return results
 
 
+THIRDPARTY_URL = "https://www.digikey.com/mylists/api/thirdparty"
+
+
+def push_thirdparty_list(
+    order_lines: list[dict],
+    list_name: str,
+    tags: str = "",
+    multiply: int = 1,
+) -> str:
+    """Push order lines to DigiKey via the keyless MyLists Third-Party API.
+
+    Returns the single-use URL: opening it (signed in) preloads the BOM into
+    the user's MyLists/cart. Nothing is created until the user confirms.
+    """
+    import requests
+
+    payload = []
+    for line in order_lines:
+        try:
+            qty = max(1, int(line.get("Quantity", 1)) * multiply)
+        except (TypeError, ValueError):
+            qty = multiply
+        payload.append(
+            {
+                "requestedPartNumber": line.get("DigiKey Part Number", ""),
+                "manufacturerName": "",
+                "referenceDesignator": (line.get("Reference") or "")[:64],
+                "customerReference": (line.get("Value") or "")[:64],
+                "notes": (line.get("Description") or "")[:256],
+                "quantities": [{"quantity": qty}],
+            }
+        )
+    params = {"listName": list_name}
+    if tags:
+        params["tags"] = tags
+    resp = requests.post(
+        THIRDPARTY_URL, params=params, headers={"Content-Type": "application/json"},
+        json=payload, timeout=60,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"MyLists push failed HTTP {resp.status_code}: {resp.text[:500]}")
+    try:
+        data = resp.json()
+        url = data.get("singleUseUrl") if isinstance(data, dict) else data
+    except Exception:
+        url = resp.text.strip().strip('"')
+    if not url or not str(url).startswith("http"):
+        raise RuntimeError(f"MyLists push returned no URL: {resp.text[:300]}")
+    return str(url)
+
+
 def write_csv(rows: list[dict], path: Path) -> Path:
     if not rows:
         raise ValueError("No rows to write")

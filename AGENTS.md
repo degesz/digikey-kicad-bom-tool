@@ -14,6 +14,7 @@ dk bom from-project <project-dir|bom.csv|bom.xml|file.kicad_sch> [--out bom.csv]
 dk bom enrich <project-dir|bom.csv> --out enriched_bom.csv --json
 dk bom check-stock <enriched.csv|project-dir> [--out stock.csv] --json
 dk bom order-list <enriched.csv|project-dir> --out order_list.csv --json
+dk bom push-list <enriched.csv|order.csv|project-dir> --list-name NAME [--tags T] [--multiply N] [--open] --json
 dk bom review <enriched.csv> --json
 dk bom pick <enriched.csv> --ref <REF> --dkpn <DKPN> --json
 dk bom write-back <enriched.csv> <project-dir> [--dry-run] --json
@@ -28,6 +29,8 @@ dk bom write-back <enriched.csv> <project-dir> [--dry-run] --json
 3. Review engineering picks: `dk bom review ./enriched.csv --json`, confirm with
    `dk bom pick ./enriched.csv --ref C19 --dkpn <DKPN> --json`, re-run check-stock.
 4. Order list: `dk bom order-list ./enriched.csv --out order.csv --json` then tell the user to upload at digikey.com → MyLists → Upload BOM.
+   Or create it directly: `dk bom push-list ./enriched.csv --list-name NAME --json` → user opens
+   the single-use URL while signed in to save it to MyLists/cart (no credentials needed).
 5. Write back into schematics (`Digikey_PN` + `Datasheet` + `Digikey_URL` per symbol,
    backups in `<proj>/.dk-backups/`, loose `*.dkbak` auto-migrated there):
    `dk bom write-back ./enriched.csv ./proj --json`

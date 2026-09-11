@@ -417,6 +417,57 @@ def bom_pick(
         raise typer.Exit(1)
 
 
+@bom_app.command("push-list")
+def bom_push_list(
+    source: Path = typer.Argument(..., help="Enriched BOM csv, order csv, or project folder"),
+    list_name: str = typer.Option(..., "--list-name", "--name", "-n", help="MyLists list name"),
+    tags: str = typer.Option("", "--tags", "-t", help="Comma-separated list tags"),
+    multiply: int = typer.Option(1, "--multiply", "-m", min=1, help="Boards to build (qty multiplier)"),
+    open_browser: bool = typer.Option(False, "--open", help="Open the single-use URL in a browser"),
+    json_out: bool = typer.Option(False, "--json"),
+    qty_field: str = typer.Option("Qty", "--qty-field"),
+    client_id: Optional[str] = typer.Option(None, "--client-id"),
+    client_secret: Optional[str] = typer.Option(None, "--client-secret"),
+    env: Optional[str] = typer.Option(None, "--env"),
+):
+    """Create the list on DigiKey: pushes order lines via the MyLists API and
+    returns a single-use URL. Open it while signed in to load the BOM into
+    your MyLists/cart (nothing is ordered automatically).
+
+    No DigiKey credentials needed for the push itself. Rows still needing an
+    engineering pick are skipped and reported.
+    """
+    import webbrowser
+
+    from .bom_ops import push_thirdparty_list
+
+    s = _settings(client_id, client_secret, env, None, None, None)
+    try:
+        rows, provenance = load_bom(source)
+        if rows and not any(r.get("digikey_pn") or r.get("Digikey_PN") for r in rows):
+            console.print("[yellow]No DigiKey PNs found — enriching via API first…[/yellow]")
+            rows = enrich_bom(rows, s)
+        order, skipped = build_order_list(rows, qty_field=qty_field)
+        if not order:
+            emit({"error": "No orderable rows; resolve picks first (`dk bom review`).",
+                  "skipped_needs_pick": skipped}, True)
+            raise typer.Exit(1)
+        url = push_thirdparty_list(order, list_name, tags=tags, multiply=multiply)
+        if open_browser:
+            webbrowser.open(url)
+        emit({"list_name": list_name, "lines": len(order), "multiply": multiply,
+              "skipped_needs_pick": skipped, "single_use_url": url}, json_out,
+             lambda d: console.print(
+                 f"[green]List '{list_name}' ready ({d['lines']} lines).[/green]\n{d['single_use_url']}\n"
+                 "Open it while signed into digikey.com to save to MyLists/cart." +
+                 (f"\n[yellow]Skipped (need picks): {', '.join(d['skipped_needs_pick'])}[/yellow]" if d["skipped_needs_pick"] else "")))
+    except typer.Exit:
+        raise
+    except Exception as e:
+        emit({"error": str(e)}, True)
+        raise typer.Exit(1)
+
+
 def main():
     app()
 
