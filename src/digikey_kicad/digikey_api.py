@@ -163,6 +163,7 @@ def simplify_product(p: dict) -> dict:
                 "packaging": (v.get("PackageType") or {}).get("Name") if isinstance(v.get("PackageType"), dict) else v.get("PackageType"),
                 "stock": v.get("QuantityAvailableforPackageType"),
                 "moq": v.get("MinimumOrderQuantity"),
+                "marketplace": bool(v.get("MarketPlace", False)),
             }
             for v in variations[:10]
         ],

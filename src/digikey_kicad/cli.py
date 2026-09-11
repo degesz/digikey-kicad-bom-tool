@@ -172,6 +172,7 @@ def bom_enrich(
     source: Path = typer.Argument(..., help="Project folder or BOM file"),
     out: Path = typer.Option(Path("enriched_bom.csv"), "--out", "-o"),
     limit: int = typer.Option(3, "--limit", help="Candidates fetched per row (1-10)"),
+    refresh_ignored: bool = typer.Option(False, "--refresh-ignored", help="Re-process rows previously excluded"),
     json_out: bool = typer.Option(False, "--json"),
     client_id: Optional[str] = typer.Option(None, "--client-id"),
     client_secret: Optional[str] = typer.Option(None, "--client-secret"),
@@ -181,7 +182,7 @@ def bom_enrich(
     s = _settings(client_id, client_secret, env, None, None, None)
     try:
         rows, provenance = load_bom(source)
-        enriched = enrich_bom(rows, s, limit=min(max(limit, 1), 10))
+        enriched = enrich_bom(rows, s, limit=min(max(limit, 1), 10), reprocess_ignored=refresh_ignored)
         write_csv(enriched, out)
         found = sum(1 for r in enriched if r.get("dk_status") == "found")
         emit({"provenance": provenance, "total": len(enriched), "matched": found, "out": str(out), "rows": enriched},
@@ -207,18 +208,20 @@ def bom_check_stock(
         results = check_stock(rows, s)
         if out:
             write_csv(results, out)
-        ok = sum(1 for r in results if r.get("ok"))
+        active = [r for r in results if (r.get("dk_status") or "") != "ignored"]
+        ignored = len(results) - len(active)
+        ok = sum(1 for r in active if r.get("ok"))
 
         def table(d):
-            t = Table(title=f"Stock: {ok}/{len(results)} in stock")
+            t = Table(title=f"Stock: {ok}/{len(active)} in stock" + (f" ({ignored} excluded)" if ignored else ""))
             for c in ("Reference", "digikey_pn", "stock", "unit_price"):
                 t.add_column(c)
-            for r in results:
+            for r in active:
                 t.add_row(str(r.get("Reference", "")), str(r.get("digikey_pn", "")), str(r.get("stock", "")), str(r.get("unit_price", "")))
             console.print(t)
 
-        emit({"provenance": provenance, "in_stock": ok, "total": len(results), "rows": results,
-              "out": str(out) if out else None}, json_out, table)
+        emit({"provenance": provenance, "in_stock": ok, "total": len(active), "ignored": ignored,
+              "rows": results, "out": str(out) if out else None}, json_out, table)
     except Exception as e:
         emit({"error": str(e)}, True)
         raise typer.Exit(1)
@@ -236,9 +239,8 @@ def bom_order_list(
 ):
     """Build a DigiKey-compatible order list CSV (upload to MyLists/BOM Manager).
 
-    Note: DigiKey cart/MyLists writes require 3-legged user OAuth, which this
-    CLI does not perform. The CSV produced here is directly importable at
-    digikey.com → MyLists → Create List → Upload BOM/CSV.
+    Prefer `dk bom push-list`, which creates the DigiKey list directly.
+    Excluded (ignored) rows and rows still needing a pick are skipped.
     """
     s = _settings(client_id, client_secret, env, None, None, None)
     try:
@@ -313,7 +315,8 @@ def bom_review(
     """
     try:
         rows, _prov = load_bom(enriched)
-        flagged = [r for r in rows if (r.get("dk_status") or "") != "found"]
+        ignored = [r.get("Reference") or r.get("Refs") for r in rows if (r.get("dk_status") or "") == "ignored"]
+        flagged = [r for r in rows if (r.get("dk_status") or "") not in ("found", "ignored", "")]
         out = [
             {
                 "reference": r.get("Reference") or r.get("Refs"),
@@ -343,7 +346,7 @@ def bom_review(
                           str(e["reason"])[:50], str(e["best"]["digikey_pn"]))
             console.print(t)
 
-        emit({"total": len(rows), "need_review": len(out), "rows": out}, json_out, table)
+        emit({"total": len(rows), "need_review": len(out), "ignored": ignored, "rows": out}, json_out, table)
     except Exception as e:
         emit({"error": str(e)}, True)
         raise typer.Exit(1)
@@ -461,6 +464,54 @@ def bom_push_list(
                  f"[green]List '{list_name}' ready ({d['lines']} lines).[/green]\n{d['single_use_url']}\n"
                  "Open it while signed into digikey.com to save to MyLists/cart." +
                  (f"\n[yellow]Skipped (need picks): {', '.join(d['skipped_needs_pick'])}[/yellow]" if d["skipped_needs_pick"] else "")))
+    except typer.Exit:
+        raise
+    except Exception as e:
+        emit({"error": str(e)}, True)
+        raise typer.Exit(1)
+
+
+@bom_app.command("exclude")
+def bom_exclude(
+    enriched: Path = typer.Argument(..., help="Enriched BOM CSV to update in place"),
+    ref: list[str] = typer.Option(..., "--ref", help="Reference(s) to exclude; repeatable, commas OK"),
+    reason: str = typer.Option("excluded by user", "--reason", "-r"),
+    clear: bool = typer.Option(False, "--clear", help="Remove exclusion so the row is processed again"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """Exclude generic hardware (pin headers, programming cables…) from ordering.
+
+    Marks matching rows `ignored`: skipped by check-stock/order-list/push-list
+    totals and kept across re-enrichment (unless --refresh-ignored).
+    CSV is updated in place (backup saved as <file>.bak).
+    """
+    try:
+        rows, _prov = load_bom(enriched)
+        if enriched.suffix.lower() != ".csv":
+            emit({"error": "exclude only supports CSV BOMs (the enriched output)"}, True)
+            raise typer.Exit(1)
+        wanted: set[str] = set()
+        for chunk in ref:
+            wanted.update(r.strip().upper() for r in chunk.split(",") if r.strip())
+        touched: list[str] = []
+        for r in rows:
+            refs = {x.strip().upper() for x in re.split(r"[,\s]+", (r.get("Reference") or r.get("Refs") or "")) if x.strip()}
+            if wanted & refs:
+                if clear:
+                    r["dk_status"] = ""
+                    r["dk_review_reason"] = ""
+                else:
+                    r["dk_status"] = "ignored"
+                    r["dk_review_reason"] = reason
+                touched.append(r.get("Reference", ""))
+        if not touched:
+            emit({"error": f"No BOM rows match ref(s): {ref}"}, True)
+            raise typer.Exit(1)
+        backup = enriched.with_suffix(enriched.suffix + ".bak")
+        backup.write_bytes(enriched.read_bytes())
+        write_csv(rows, enriched)
+        emit({"updated_rows": touched, "ignored": not clear, "out": str(enriched), "backup": str(backup)}, json_out,
+             lambda d: console.print(f"[green]Updated {d['updated_rows']}[/green]"))
     except typer.Exit:
         raise
     except Exception as e:

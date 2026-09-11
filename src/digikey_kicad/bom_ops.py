@@ -25,11 +25,18 @@ def _price_of(product: dict) -> float:
         return float("inf")
 
 
+def _all_marketplace(product: dict) -> bool:
+    varss = product.get("ProductVariations") or []
+    return bool(varss) and all(v.get("MarketPlace", False) for v in varss)
+
+
 def rank_products(products: list[dict], row_mpn: str = "") -> list[dict]:
     """Best candidate first.
 
     - Exact MPN match always wins (row carries a real manufacturer part number).
     - Otherwise prefer large stock + low single-unit price (generic passives).
+    - Marketplace-only products sort last (never preferred when a
+      DigiKey-stocked alternative exists).
     """
     mpn = (row_mpn or "").strip().upper()
 
@@ -40,15 +47,19 @@ def rank_products(products: list[dict], row_mpn: str = "") -> list[dict]:
         else:
             exact = 1 if mpn else 0  # no MPN -> all generic, rank by availability
         stock = p.get("QuantityAvailable") or 0
-        return (exact, 0 if stock > 0 else 1, _price_of(p), -stock)
+        return (exact, 1 if _all_marketplace(p) else 0, 0 if stock > 0 else 1, _price_of(p), -stock)
 
     return sorted(products, key=key)
 
 
-def choose_variant(variations: list[dict], needed: int = 1) -> dict | None:
+def choose_variant(
+    variations: list[dict], needed: int = 1, allow_marketplace: bool = False
+) -> dict | None:
     """Pick the order packaging. Cut tape accepted: prefer prototype-friendly
-    in-stock packaging (CT, Digi-Reel) with the lowest MOQ covering `needed`."""
-    in_stock = [v for v in variations if (v.get("stock") or 0) > 0]
+    in-stock packaging (CT, Digi-Reel) with the lowest MOQ covering `needed`.
+    Marketplace variations are excluded unless explicitly allowed."""
+    pool = variations if allow_marketplace else [v for v in variations if not v.get("marketplace")]
+    in_stock = [v for v in pool if (v.get("stock") or 0) > 0]
     if not in_stock:
         return None
 
@@ -59,6 +70,10 @@ def choose_variant(variations: list[dict], needed: int = 1) -> dict | None:
 
     cover = [v for v in in_stock if (v.get("stock") or 0) >= needed]
     return sorted(cover or in_stock, key=key)[0]
+
+
+def marketplace_stock(variations: list[dict]) -> int:
+    return sum((v.get("stock") or 0) for v in variations if v.get("marketplace"))
 
 
 def alternates_text(products: list[dict]) -> str:
@@ -78,11 +93,15 @@ def enrich_bom(
     settings: Settings,
     limit: int = 5,
     delay_s: float = 0.3,
+    reprocess_ignored: bool = False,
 ) -> list[dict]:
     import time
 
     enriched: list[dict] = []
     for row in rows:
+        if (row.get("dk_status") or "") == "ignored" and not reprocess_ignored:
+            enriched.append(dict(row))  # user-excluded hardware stays excluded
+            continue
         queries = candidate_queries(row)
         out = dict(row)
         if not queries:
@@ -144,6 +163,10 @@ def enrich_bom(
                         }
                     )
                 else:
+                    mp_stock = marketplace_stock(best.get("variations") or [])
+                    reason = "out_of_stock_everywhere"
+                    if mp_stock > 0:
+                        reason = f"marketplace_only ({mp_stock} via marketplace, excluded)"
                     out.update(
                         base
                         | {
@@ -151,7 +174,7 @@ def enrich_bom(
                             "dk_pkg": (best.get("variations") or [{}])[0].get("packaging"),
                             "dk_stock": 0,
                             "dk_status": "needs_review",
-                            "dk_review_reason": "out_of_stock_everywhere",
+                            "dk_review_reason": reason,
                             "dk_alternatives": alternates_text(ranked[1:]),
                         }
                     )
@@ -168,6 +191,9 @@ def check_stock(rows: list[dict], settings: Settings) -> list[dict]:
     preferred orderable variant (prototype-friendly CT/Digi-Reel first)."""
     results: list[dict] = []
     for row in rows:
+        if (row.get("dk_status") or "") == "ignored":
+            results.append({**row, "stock_status": "ignored", "ok": False})
+            continue
         dkpn = (row.get("digikey_pn") or row.get("Digikey_PN") or row.get("DK_PN") or "").strip()
         queries = candidate_queries(row) if not dkpn else [dkpn]
         query = queries[0] if queries else ""
@@ -188,7 +214,12 @@ def check_stock(rows: list[dict], settings: Settings) -> list[dict]:
                             break
                     needed = _row_qty(row)
                     best = choose_variant(s.get("variations") or [], needed)
-                    any_stock = max([(v.get("stock") or 0) for v in (s.get("variations") or [])] + [0])
+                    retail = [v for v in (s.get("variations") or []) if not v.get("marketplace")]
+                    any_stock = max([(v.get("stock") or 0) for v in retail] + [0])
+                    mp_stock = marketplace_stock(s.get("variations") or [])
+                    status = s["stock_status"]
+                    if any_stock == 0 and mp_stock > 0:
+                        status = f"{status} (marketplace-only stock excluded)" if status else "marketplace-only stock"
                     results.append(
                         {
                             **row,
@@ -197,7 +228,8 @@ def check_stock(rows: list[dict], settings: Settings) -> list[dict]:
                             "stock_any_pkg": any_stock,
                             "best_pkg": (best or {}).get("digikey_pn", ""),
                             "best_pkg_name": (best or {}).get("packaging", ""),
-                            "stock_status": s["stock_status"],
+                            "marketplace_stock": mp_stock,
+                            "stock_status": status,
                             "unit_price": str(s["unit_price"] or ""),
                             "datasheet": s["datasheet_url"],
                             "ok": any_stock > 0,
