@@ -14,7 +14,7 @@ dk bom from-project <project-dir|bom.csv|bom.xml|file.kicad_sch> [--out bom.csv]
 dk bom enrich <project-dir|bom.csv> --out enriched_bom.csv --json
 dk bom check-stock <enriched.csv|project-dir> [--out stock.csv] --json
 dk bom order-list <enriched.csv|project-dir> --out order_list.csv --json
-dk bom push-list <enriched.csv|order.csv|project-dir> --list-name NAME [--tags T] [--multiply N] [--open] --json
+dk bom push-list <enriched.csv|order.csv|project-dir> --list-name NAME [--tags T] [--multiply N] [--include-oos] [--open] --json
 dk bom review <enriched.csv> --json
 dk bom pick <enriched.csv> --ref <REF> --dkpn <DKPN> --json
 dk bom exclude <enriched.csv> --ref <REF...> [--reason R] [--clear] --json

@@ -329,24 +329,28 @@ def write_csv(rows: list[dict], path: Path) -> Path:
     return path
 
 
-def build_order_list(rows: list[dict], qty_field: str = "Qty") -> tuple[list[dict], list[str]]:
+def build_order_list(
+    rows: list[dict], qty_field: str = "Qty", include_oos: bool = False
+) -> tuple[list[dict], list[str]]:
     """Collapse an enriched BOM into a DigiKey-uploadable order list.
 
     Output columns match DigiKey's MyLists/BOM-Manager CSV import:
     Quantity, DigiKey Part Number, Manufacturer Part Number, Reference(s).
-    Rows flagged needs_review/not_found/error (no orderable pick) are skipped;
-    their references are returned second for the caller to report.
+    Rows flagged needs_review/not_found/error (no orderable pick) are skipped
+    unless include_oos is set — then rows that at least have a DigiKey part
+    number are included anyway (e.g. held-out backorder parts). Explicitly
+    ignored rows and rows without any DKPN are always skipped.
     Returns (order_lines, skipped_references).
     """
     order: list[dict] = []
     skipped: list[str] = []
     for r in rows:
         status = (r.get("dk_status") or "").strip()
-        if status and status not in ("found",):
+        dkpn = (r.get("digikey_pn") or r.get("Digikey_PN") or r.get("DK_PN") or "").strip()
+        if status == "ignored" or not dkpn:
             skipped.append(r.get("Reference") or r.get("Refs") or "?")
             continue
-        dkpn = (r.get("digikey_pn") or r.get("Digikey_PN") or r.get("DK_PN") or "").strip()
-        if not dkpn:
+        if status and status != "found" and not include_oos:
             skipped.append(r.get("Reference") or r.get("Refs") or "?")
             continue
         qty = r.get(qty_field) or r.get("Quantity") or r.get("Qty") or r.get("QUANTITY") or "1"

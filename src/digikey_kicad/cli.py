@@ -233,6 +233,7 @@ def bom_order_list(
     out: Path = typer.Option(Path("order_list.csv"), "--out", "-o"),
     json_out: bool = typer.Option(False, "--json"),
     qty_field: str = typer.Option("Qty", "--qty-field"),
+    include_oos: bool = typer.Option(False, "--include-oos", help="Include out-of-stock/needs-review rows that have a DKPN"),
     client_id: Optional[str] = typer.Option(None, "--client-id"),
     client_secret: Optional[str] = typer.Option(None, "--client-secret"),
     env: Optional[str] = typer.Option(None, "--env"),
@@ -249,7 +250,7 @@ def bom_order_list(
         if rows and not any(r.get("digikey_pn") or r.get("Digikey_PN") for r in rows):
             console.print("[yellow]No DigiKey PNs found — enriching via API first…[/yellow]", file=sys.stderr)
             rows = enrich_bom(rows, s)
-        order, skipped = build_order_list(rows, qty_field=qty_field)
+        order, skipped = build_order_list(rows, qty_field=qty_field, include_oos=include_oos)
         if not order:
             emit({"error": "No rows with DigiKey part numbers; enrich the BOM first.", "provenance": provenance}, True)
             raise typer.Exit(1)
@@ -427,6 +428,7 @@ def bom_push_list(
     tags: str = typer.Option("", "--tags", "-t", help="Comma-separated list tags"),
     multiply: int = typer.Option(1, "--multiply", "-m", min=1, help="Boards to build (qty multiplier)"),
     open_browser: bool = typer.Option(False, "--open", help="Open the single-use URL in a browser"),
+    include_oos: bool = typer.Option(False, "--include-oos", help="Include out-of-stock/needs-review rows that have a DKPN"),
     json_out: bool = typer.Option(False, "--json"),
     qty_field: str = typer.Option("Qty", "--qty-field"),
     client_id: Optional[str] = typer.Option(None, "--client-id"),
@@ -450,7 +452,7 @@ def bom_push_list(
         if rows and not any(r.get("digikey_pn") or r.get("Digikey_PN") for r in rows):
             console.print("[yellow]No DigiKey PNs found — enriching via API first…[/yellow]")
             rows = enrich_bom(rows, s)
-        order, skipped = build_order_list(rows, qty_field=qty_field)
+        order, skipped = build_order_list(rows, qty_field=qty_field, include_oos=include_oos)
         if not order:
             emit({"error": "No orderable rows; resolve picks first (`dk bom review`).",
                   "skipped_needs_pick": skipped}, True)
