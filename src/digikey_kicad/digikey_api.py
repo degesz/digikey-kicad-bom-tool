@@ -143,15 +143,21 @@ def simplify_product(p: dict) -> dict:
             "name": x.get("Parameter") or x.get("ParameterText"),
             "value": x.get("Value") or x.get("ValueText"),
         })
+
+    def _url(u: str | None) -> str:
+        u = (u or "").strip()
+        if u.startswith("//"):
+            return "https:" + u
+        return u
     return {
         "digikey_pn": dkpn,
         "mpn": p.get("ManufacturerProductNumber"),
         "manufacturer": mfg.get("Name"),
         "description": desc.get("ProductDescription"),
         "detailed_description": desc.get("DetailedDescription"),
-        "datasheet_url": p.get("DatasheetUrl"),
-        "product_url": p.get("ProductUrl"),
-        "photo_url": p.get("PhotoUrl"),
+        "datasheet_url": _url(p.get("DatasheetUrl")),
+        "product_url": _url(p.get("ProductUrl")),
+        "photo_url": _url(p.get("PhotoUrl")),
         "category": cat.get("Name") if isinstance(cat, dict) else cat,
         "quantity_available": qty,
         "stock_status": stock_status,

@@ -284,9 +284,18 @@ def bom_write_back(
         rows, _prov = load_bom(enriched)
         ref_map: dict[str, dict] = {}
         for ref, r in expand_references(rows).items():
-            dkpn = (r.get("digikey_pn") or r.get("Digikey_PN") or "").strip()
-            ds = (r.get("dk_datasheet") or r.get("Datasheet") or r.get("datasheet") or "").strip()
-            url = (r.get("dk_product_url") or r.get("Product URL") or r.get("Digikey_URL") or "").strip()
+            status = (r.get("dk_status") or "").strip()
+            if status == "ignored":
+                continue  # excluded hardware: never touch the schematic
+            dkpn = (r.get("digikey_pn") or "").strip()
+            ds = (r.get("dk_datasheet") or "").strip()
+            url = (r.get("dk_product_url") or r.get("Digikey_URL") or "").strip()
+            if status in ("", "found"):
+                # raw or confirmed rows may carry schematic-origin columns
+                dkpn = dkpn or (r.get("Digikey_PN") or "").strip()
+                ds = ds or (r.get("Datasheet") or r.get("datasheet") or "").strip()
+            # needs_review/not_found/error: lowercase only, so cleared
+            # fields are never resurrected from stale schematic columns
             if dkpn or ds or url:
                 ref_map[ref] = {"digikey_pn": dkpn, "datasheet": ds, "url": url}
         if not ref_map:
