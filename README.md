@@ -18,28 +18,24 @@ dk --help
 
 Requires Python ≥ 3.10. Optional: `kicad-cli` on PATH for best BOM export.
 
-## Credentials (never committed)
+## Setup: DigiKey API keys
 
-No credentials are shipped with this tool. Provide your own DigiKey
-`client_credentials` app keys (https://developer.digikey.com/).
-Override precedence (highest first):
+Get a `client_credentials` app key pair at https://developer.digikey.com/,
+then make them available to `dk` using any of these methods
+(highest precedence first):
 
 1. CLI flags: `--client-id`, `--client-secret`, `--env`
-2. Real env vars: `DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET`, `DIGIKEY_ENV`, `DIGIKEY_SITE`, `DIGIKEY_LANG`, `DIGIKEY_CURRENCY`
-3. `.env` in cwd, or `~/.config/digikey-kicad/.env`
-4. Empty (commands fail with a helpful message until credentials are set)
+2. Environment variables: `DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET`
+   (plus optional `DIGIKEY_ENV`, `DIGIKEY_SITE`, `DIGIKEY_LANG`, `DIGIKEY_CURRENCY`)
+3. A `.env` file in the current directory, or at `~/.config/digikey-kicad/.env`
 
 ```bash
-cp .env.example .env   # then edit
-export DIGIKEY_CLIENT_ID=... DIGIKEY_CLIENT_SECRET=...
-dk auth --json
+cp .env.example .env   # then edit in your client ID and secret
+dk auth --json         # verify the keys work
 dk config-show
 ```
 
 Default API env is **production** (`https://api.digikey.com`); use `--env sandbox` for testing.
-
-> Never commit `.env` or real secrets. If a key ever leaks, revoke/rotate it
-> immediately in the DigiKey portal — removing it from git history is not enough.
 
 ## Usage
 
