@@ -1,0 +1,4 @@
+Reference,Value,Footprint,Qty,MPN,Manufacturer
+R1,10k,R_0603,2,RC0603FR-0710KL,Yageo
+C1,100n,C_0603,4,CL10B104KB8NNNC,Samsung
+U1,STM32G431KBT6,LQFP-32,1,STM32G431KBT6,STMicroelectronics

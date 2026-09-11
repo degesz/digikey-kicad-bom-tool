@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.egg-info/
+dist/
+build/
+.cache/
+# DigiKey token cache lives in ~/.cache — do not commit
+enriched_*.csv
+order_*.csv
+bom_export_*.csv
+*.bak

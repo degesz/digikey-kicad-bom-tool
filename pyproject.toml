@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "digikey-kicad-bom-tool"
+version = "0.1.0"
+description = "DigiKey API CLI for AI agents: search, KiCad BOM enrich, stock check, order lists"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "typer>=0.9",
+  "requests>=2.31",
+  "rich>=13",
+]
+
+[project.scripts]
+dk = "digikey_kicad.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
