@@ -364,6 +364,19 @@ def _footprint_queries(footprint: str) -> list[str]:
     return seen
 
 
+def generic_hardware_reason(row: dict) -> str:
+    """Detect lab-stock hardware that must never be looked up or ordered.
+
+    Generic KiCad pin-header placeholders (Value Conn_* on a PinHeader
+    footprint) are assembly stock, not purchase parts.
+    """
+    val = (row.get("Value") or "").strip()
+    fp = (row.get("Footprint") or "").lower()
+    if re.match(r"(?i)^conn_", val) and "pinheader" in fp.replace("_", ""):
+        return "generic pin header: lab stock, no lookup"
+    return ""
+
+
 def candidate_queries(row: dict) -> list[str]:
     """Ordered DigiKey keyword queries for a BOM row, best first."""
     val = (row.get("Value") or "").strip()

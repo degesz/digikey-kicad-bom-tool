@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import digikey_api as dk
 from .config import Settings
-from .kicad_bom import candidate_queries
+from .kicad_bom import candidate_queries, generic_hardware_reason
 
 
 def _row_qty(row: dict) -> int:
@@ -101,6 +101,12 @@ def enrich_bom(
     for row in rows:
         if (row.get("dk_status") or "") == "ignored" and not reprocess_ignored:
             enriched.append(dict(row))  # user-excluded hardware stays excluded
+            continue
+        auto = generic_hardware_reason(row)
+        if auto and not reprocess_ignored:
+            out = dict(row)
+            out.update({"dk_status": "ignored", "dk_review_reason": auto, "dk_query": ""})
+            enriched.append(out)
             continue
         queries = candidate_queries(row)
         out = dict(row)

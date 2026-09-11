@@ -49,5 +49,31 @@ dk bom write-back <enriched.csv> <project-dir> [--dry-run] --json
   `needs_review` rows need a human/agent pick via `dk bom pick`.
 - Generic hardware (cables, pin headers) can be dropped from ordering with
   `dk bom exclude` (status `ignored`, kept across re-enrichment).
+  Generic pin headers (`Conn_*` on a `PinHeader` footprint) are auto-ignored
+  at enrich time — never looked up, never ordered.
 - Credentials: flags `--client-id/--client-secret/--env` override env `DIGIKEY_CLIENT_ID/...`; do not print secrets.
 - Never commit `.env` or token cache (`~/.cache/digikey-kicad/`).
+
+## Verification (mandatory after every enrich)
+
+Automated matching is best-effort. Before order-list / push-list / write-back,
+check EVERY `found` row and decide if the pick makes sense; anything doubtful
+goes to `needs_review` (clear its `digikey_pn`/`Digikey_PN` fields or
+`dk bom pick` a better part) — never order a part you cannot defend:
+
+- **Value match**: `dk_mpn`/`dk_description` must equal the schematic Value
+  (resistance, capacitance, voltage rating, tolerance). Watch unit traps
+  (`30 mR` vs `30 mΩ` vs `R030`) and voltage derating on ceramics.
+- **Package match**: footprint size must fit the picked package
+  (`C_0603` ≠ `0603` confusion, `SOT-23` vs `SOT-223`, `0805` vs `0805-wide`).
+- **Connectors**: verify series, pin count, pitch, mounting (SMD/THT/panel/cable)
+  and orientation against the footprint — keyword hits often return the wrong
+  mating/mounting variant (e.g. cable-mount XT60 vs panel-mount XT60PW-M).
+- **ICs**: exact MPN match required; same family ≠ same part
+  (`THVD1420DRLR` vs `THVD1420DR`). Check `dk_manufacturer` too.
+- **No marketplace**: `dk bom check-stock` reports `marketplace_stock`
+  separately — never order it; find a DigiKey-stocked variant or substitute.
+- **Datasheet sanity**: `dk_datasheet` host should belong to the manufacturer
+  (ti.com, st.com, yageo…) or DigiKey; a mismatch signals a wrong pick.
+- After any correction: re-run check-stock, review (expect zero rows except
+  genuinely held-out parts), then order-list / push-list.
